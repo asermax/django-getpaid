@@ -1,8 +1,11 @@
 from django.conf import settings
+from django.http import HttpResponseRedirect
 from django.core.exceptions import ImproperlyConfigured
 from django.template.base import Template
 from django.template.context import Context
+from django.template.response import TemplateResponse
 from getpaid.utils import get_backend_settings
+from getpaid.signals import redirecting_to_payment_gateway_signal
 
 
 class PaymentProcessorBase(object):
@@ -13,7 +16,7 @@ class PaymentProcessorBase(object):
        a View for incoming transaction notification status changes
     """
 
-    #Each backend need to define this values
+    # Each backend need to define this values
     BACKEND = None
     """
     This constant should be set to fully qualified python path to the module. This is also
@@ -37,7 +40,8 @@ class PaymentProcessorBase(object):
     def __init__(self, payment):
 
         if payment.currency not in self.BACKEND_ACCEPTED_CURRENCY:
-            raise ValueError("Backend '%s' cannot process '%s' payments." % (self.BACKEND, payment.currency))
+            raise ValueError(
+                "Backend '%s' cannot process '%s' payments." % (self.BACKEND, payment.currency))
         self.payment = payment
 
     @classmethod
@@ -69,6 +73,29 @@ class PaymentProcessorBase(object):
         """
         raise NotImplementedError('Must be implemented in PaymentProcessor')
 
+    def redirect_to_gateway(self, payment):
+        gateway_url_tuple = self.get_gateway_url(self.request)
+        payment.change_status('in_progress')
+        redirecting_to_payment_gateway_signal.send(
+            sender=None,
+            request=self.request,
+            order=payment.order,
+            payment=payment,
+            backend=payment.backend)
+
+        if gateway_url_tuple[1].upper() == 'GET':
+            return HttpResponseRedirect(gateway_url_tuple[0])
+        elif gateway_url_tuple[1].upper() == 'POST':
+            context = self.get_context_data()
+            context['gateway_url'] = self.get_gateway_url(self.request)[0]
+            context['form'] = self.get_form(gateway_url_tuple[2])
+
+            return TemplateResponse(request=self.request,
+                                    template=self.get_template_names(),
+                                    context=context)
+        else:
+            raise ImproperlyConfigured()
+
     def get_form(self, post_data):
         """
         Only used if the payment processor requires POST requests.
@@ -92,4 +119,5 @@ class PaymentProcessorBase(object):
             try:
                 return backend_settings[name]
             except KeyError:
-                raise ImproperlyConfigured("getpaid '%s' requires backend '%s' setting" % (cls.BACKEND, name))
+                raise ImproperlyConfigured(
+                    "getpaid '%s' requires backend '%s' setting" % (cls.BACKEND, name))
